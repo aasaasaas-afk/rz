@@ -9,6 +9,7 @@ import hashlib
 import base64
 import logging
 import os
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 app = Flask(__name__)
 
@@ -22,17 +23,8 @@ PAYMENT_PAGE_ITEM_ID = 'ppi_F4nKNHUJswbQ5b'
 AMOUNT = 100  # ₹1.00 INR
 
 class RazorpayChecker:
-    def __init__(self, proxy=None):
+    def __init__(self):
         self.session = requests.Session()
-        if proxy:
-            parts = proxy.split(':')
-            if len(parts) == 4:
-                user, passw, ip, port = parts
-                proxy_url = f'http://{user}:{passw}@{ip}:{port}'
-                self.session.proxies = {'http': proxy_url, 'https': proxy_url}
-                logger.info(f"Using proxy: {proxy_url}")
-            else:
-                raise ValueError("Invalid proxy format. Expected user:pass:ip:port")
         self.key_id = None
         self.order_id = None
         self.payment_id = None
@@ -53,31 +45,59 @@ class RazorpayChecker:
         chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
         return ''.join(random.choice(chars) for _ in range(14))
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(requests.RequestException),
+        before_sleep=lambda retry_state: logger.info(f"Retrying load_payment_page... Attempt {retry_state.attempt_number}")
+    )
     def load_payment_page(self):
         """Request #1: Load payment page"""
         try:
             logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             logger.info("Starting Razorpay Checker Session...")
             logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
             logger.info("[Step 1/5] Loading payment page...")
 
-            response = self.session.get(RAZORPAY_PAGE_URL, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }, timeout=15)
+            response = self.session.get(
+                RAZORPAY_PAGE_URL,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Connection': 'keep-alive'
+                },
+                timeout=15
+            )
 
             logger.info(f"           Status: {response.status_code} ✓")
 
             if response.status_code == 200:
+                # Primary regex for key_id
                 key_match = re.search(r'"key_id"\s*:\s*"([^"]+)"', response.text)
                 if key_match:
                     self.key_id = key_match.group(1)
                     logger.info(f"           ✓ key_id: {self.key_id}")
                     return True
+                
+                # Fallback regex in case page structure changes
+                fallback_match = re.search(r'key_id\s*=\s*"([^"]+)"', response.text)
+                if fallback_match:
+                    self.key_id = fallback_match.group(1)
+                    logger.info(f"           ✓ key_id (fallback): {self.key_id}")
+                    return True
+                
+                logger.error(f"           Failed to extract key_id. Response snippet: {response.text[:200]}...")
+                return False
+            
+            logger.error(f"           Failed with status {response.status_code}. Response: {response.text[:200]}...")
             return False
 
+        except requests.RequestException as e:
+            logger.error(f"           Request error: {str(e)}")
+            raise
         except Exception as e:
-            logger.error(f"           Error: {str(e)}")
+            logger.error(f"           Unexpected error: {str(e)}")
             return False
 
     def create_order(self, email, phone):
@@ -87,7 +107,10 @@ class RazorpayChecker:
 
             response = self.session.post(
                 f'https://api.razorpay.com/v1/payment_pages/{PAYMENT_PAGE_ID}/order',
-                headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'},
+                headers={
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                },
                 json={
                     'line_items': [{'payment_page_item_id': PAYMENT_PAGE_ITEM_ID, 'amount': AMOUNT}],
                     'notes': {'email': email, 'phone': phone, 'purpose': 'Advance payment'}
@@ -100,8 +123,12 @@ class RazorpayChecker:
             if response.status_code == 200:
                 data = response.json()
                 self.order_id = data.get('order', {}).get('id')
-                logger.info(f"           ✓ order_id: {self.order_id}")
-                return True
+                if self.order_id:
+                    logger.info(f"           ✓ order_id: {self.order_id}")
+                    return True
+                logger.error(f"           No order_id found in response: {json.dumps(data, indent=2)[:200]}...")
+                return False
+            logger.error(f"           Failed with status {response.status_code}. Response: {response.text[:200]}...")
             return False
 
         except Exception as e:
@@ -145,14 +172,13 @@ class RazorpayChecker:
             if response.status_code == 200:
                 # Extract session_token from response
                 token_match = re.search(r'window\.session_token\s*=\s*"([^"]+)"', response.text)
-
                 if token_match:
                     self.session_token = token_match.group(1)
                     logger.info(f"           ✓ session_token: {self.session_token[:40]}...")
                     return True
-                else:
-                    logger.error("           Failed to extract session_token")
-                    return False
+                logger.error(f"           Failed to extract session_token. Response: {response.text[:200]}...")
+                return False
+            logger.error(f"           Failed with status {response.status_code}. Response: {response.text[:200]}...")
             return False
 
         except Exception as e:
@@ -262,7 +288,6 @@ class RazorpayChecker:
 
 def format_response(payment_response, status_response=None):
     """Format response"""
-
     if status_response and 'error' in status_response:
         error_data = status_response.get('error', {})
         code = error_data.get('code', 'UNKNOWN_ERROR')
@@ -330,15 +355,11 @@ def format_response(payment_response, status_response=None):
 
     return {'status': '❓ UNKNOWN', 'gateway': 'Razorpay', 'amount': '₹1.00 INR', 'raw': str(payment_response)[:200]}
 
-@app.route('/gateway/<gateway>/key/<key>', methods=['GET'])
-def check_card(gateway, key):
-    if gateway != 'rz1' or key != 'rocky':
-        return jsonify({'error': 'Invalid gateway or key'}), 403
-
+@app.route('/api/razorpay/pay', methods=['GET'])
+def check_card():
     cc_data = request.args.get('cc')
-    proxy = request.args.get('proxy')
     if not cc_data:
-        return jsonify({'error': 'Missing card data', 'usage': '?cc=CARD|MM|YY|CVV&proxy=user:pass:ip:port'}), 400
+        return jsonify({'error': 'Missing card data', 'usage': '/api/razorpay/pay?cc=CARD|MM|YY|CVV'}), 400
 
     parts = cc_data.split('|')
     if len(parts) != 4:
@@ -353,13 +374,13 @@ def check_card(gateway, key):
     logger.info(f"{'='*60}")
 
     try:
-        checker = RazorpayChecker(proxy=proxy)
+        checker = RazorpayChecker()
 
         if not checker.load_payment_page():
-            return jsonify({'status': '❌ ERROR', 'error': 'Failed to load page'}), 500
+            return jsonify({'status': '❌ ERROR', 'error': 'Failed to load payment page'}), 500
 
         if not checker.create_order(email, phone):
-            return jupytext({'status': '❌ ERROR', 'error': 'Failed to create order'}), 500
+            return jsonify({'status': '❌ ERROR', 'error': 'Failed to create order'}), 500
 
         if not checker.load_checkout_and_extract_token():
             return jsonify({'status': '❌ ERROR', 'error': 'Failed to extract session token'}), 500
@@ -375,7 +396,8 @@ def check_card(gateway, key):
         return jsonify(result), 200
 
     except Exception as e:
-        return jsonify({'status': '❌ ERROR', 'error': str(e)}), 500
+        logger.error(f"Unexpected error in check_card: {str(e)}")
+        return jsonify({'status': '❌ ERROR', 'error': f"Internal server error: {str(e)}"}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -389,7 +411,7 @@ def root():
         'gateway': 'Razorpay (India)',
         'amount': '₹1.00 INR',
         'endpoints': {
-            '/gateway/rz1/key/rocky?cc=CARD|MM|YY|CVV&proxy=user:pass:ip:port': 'Card check',
+            '/api/razorpay/pay?cc=CARD|MM|YY|CVV': 'Card check',
             '/health': 'Health check'
         }
     }), 200
@@ -405,7 +427,7 @@ if __name__ == '__main__':
     print("  3. Load checkout page → Extract session_token from HTML")
     print("  4. Submit payment → Process card with real token")
     print("  5. Check status → Get final result")
-    print("\nServer starting on 0.0.0.0...")
+    print("\nServer starting on 0.0.0.0:5000...")
     print("="*70 + "\n")
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
