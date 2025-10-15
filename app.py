@@ -291,83 +291,47 @@ class RazorpayChecker:
             return None
 
 def format_response(payment_response, status_response=None):
-    """Format response"""
+    """Format response with only description and Status"""
     if status_response and 'error' in status_response:
         error_data = status_response.get('error', {})
-        code = error_data.get('code', 'UNKNOWN_ERROR')
         description = error_data.get('description', 'Unknown error')
-        reason = error_data.get('reason', 'N/A')
-        step = error_data.get('step', 'N/A')
-        metadata = error_data.get('metadata', {})
+        reason = error_data.get('reason', 'N/A').lower()
 
         if 'not_enrolled' in reason or '3dsecure' in description.lower():
-            status_icon, message = '🔒 CARD NOT ENROLLED', '3D Secure not enabled'
+            return {'description': '3D Secure not enabled', 'Status': '3ds'}
         elif 'insufficient' in description.lower():
-            status_icon, message = '💰 INSUFFICIENT FUNDS', 'Low balance'
+            return {'description': 'Insufficient funds', 'Status': 'declined'}
         elif 'invalid' in description.lower():
-            status_icon, message = '❌ INVALID CARD', 'Invalid details'
+            return {'description': 'Invalid card details', 'Status': 'declined'}
         elif 'expired' in description.lower():
-            status_icon, message = '📅 CARD EXPIRED', 'Card expired'
+            return {'description': 'Card expired', 'Status': 'declined'}
         elif 'declined' in description.lower():
-            status_icon, message = '❌ DECLINED', 'Issuer declined'
+            return {'description': 'Card declined by issuer', 'Status': 'declined'}
         else:
-            status_icon, message = '❌ ERROR', description
-
-        return {
-            'status': status_icon,
-            'gateway': 'Razorpay',
-            'amount': '₹1.00 INR',
-            'message': message,
-            'error_details': {
-                'code': code,
-                'description': description,
-                'reason': reason,
-                'step': step
-            },
-            'transaction': {
-                'payment_id': metadata.get('payment_id', 'N/A'),
-                'order_id': metadata.get('order_id', 'N/A')
-            }
-        }
+            return {'description': description, 'Status': 'declined'}
 
     if 'error' in payment_response:
-        return {
-            'status': '❌ ERROR',
-            'gateway': 'Razorpay',
-            'amount': '₹1.00 INR',
-            'message': payment_response.get('error', 'Unknown error'),
-            'raw': payment_response.get('raw', '')[:500]
-        }
+        return {'description': payment_response.get('error', 'Unknown error'), 'Status': 'declined'}
 
-    if 'razorpay_payment_id' in payment_response:
-        return {
-            'status': '✅ SUCCESS',
-            'gateway': 'Razorpay',
-            'amount': '₹1.00 INR',
-            'message': 'Payment processed',
-            'transaction': {
-                'payment_id': payment_response.get('razorpay_payment_id')
-            }
-        }
+    if 'razorpay_payment_id' in payment_response or 'payment_id' in payment_response:
+        return {'description': 'Payment successful', 'Status': 'approved'}
 
     if 'next' in payment_response:
-        action = payment_response.get('next', [{}])[0].get('action', 'unknown')
-        if action == 'otp':
-            return {'status': '🔒 OTP REQUIRED', 'gateway': 'Razorpay', 'amount': '₹1.00 INR', 'message': 'OTP needed'}
-        elif action == '3ds':
-            return {'status': '🔒 3DS REQUIRED', 'gateway': 'Razorpay', 'amount': '₹1.00 INR', 'message': '3DS needed'}
+        action = payment_response.get('next', [{}])[0].get('action', 'unknown').lower()
+        if action == 'otp' or action == '3ds':
+            return {'description': '3D Secure or OTP required', 'Status': '3ds'}
 
-    return {'status': '❓ UNKNOWN', 'gateway': 'Razorpay', 'amount': '₹1.00 INR', 'raw': str(payment_response)[:500]}
+    return {'description': 'Unknown response from gateway', 'Status': 'declined'}
 
 @app.route('/api/razorpay/pay', methods=['GET'])
 def check_card():
     cc_data = request.args.get('cc')
     if not cc_data:
-        return jsonify({'error': 'Missing card data', 'usage': '/api/razorpay/pay?cc=CARD|MM|YY|CVV'}), 400
+        return jsonify({'description': 'Missing card data', 'Status': 'declined'}), 400
 
     parts = cc_data.split('|')
     if len(parts) != 4:
-        return jsonify({'error': 'Invalid card format'}), 400
+        return jsonify({'description': 'Invalid card format', 'Status': 'declined'}), 400
 
     card_number, exp_month, exp_year, cvv = parts
     email = f"test{random.randint(1000,9999)}@example.com"
@@ -381,31 +345,31 @@ def check_card():
         checker = RazorpayChecker()
 
         if not checker.load_payment_page():
-            return jsonify({'status': '❌ ERROR', 'error': 'Failed to load payment page'}), 500
+            return jsonify({'description': 'Failed to load payment page', 'Status': 'declined'}), 500
 
         if not checker.create_order(email, phone):
-            return jsonify({'status': '❌ ERROR', 'error': 'Failed to create order'}), 500
+            return jsonify({'description': 'Failed to create order', 'Status': 'declined'}), 500
 
         if not checker.load_checkout_and_extract_token():
-            return jsonify({'status': '❌ ERROR', 'error': 'Failed to extract session token'}), 500
+            return jsonify({'description': 'Failed to extract session token', 'Status': 'declined'}), 500
 
         payment_response = checker.submit_payment(card_number, exp_month, exp_year, cvv, email, phone)
         status_response = checker.check_status()
         result = format_response(payment_response, status_response)
 
         logger.info(f"\n{'━'*60}")
-        logger.info(f"RESULT: {result['status']}")
+        logger.info(f"RESULT: {result['Status']}")
         logger.info(f"{'━'*60}\n")
 
         return jsonify(result), 200
 
     except Exception as e:
         logger.error(f"Unexpected error in check_card: {str(e)}")
-        return jsonify({'status': '❌ ERROR', 'error': f"Internal server error: {str(e)}"}), 500
+        return jsonify({'description': f"Internal server error: {str(e)}", 'Status': 'declined'}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'healthy', 'service': 'Razorpay Checker', 'version': '1.1.0'}), 200
+    return jsonify({'description': 'Service is healthy', 'Status': 'approved'}), 200
 
 @app.route('/', methods=['GET'])
 def root():
@@ -415,7 +379,7 @@ def root():
         'gateway': 'Razorpay (India)',
         'amount': '₹1.00 INR',
         'endpoints': {
-            '/api/razorpay/pay?cc=CARD|MM|YY|CVV': 'Card check',
+            '/api/razorpay/pay?cc=CARD|MM|YY|CVV': 'Card check (returns description and Status: approved/declined/charged/3ds)',
             '/health': 'Health check'
         }
     }), 200
