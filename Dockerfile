@@ -4,7 +4,7 @@ FROM python:3.10-slim
 # Set working directory
 WORKDIR /app
 
-# Copy requirements file
+# Copy requirements first for better Docker layer caching
 COPY requirements.txt .
 
 # Install dependencies
@@ -13,11 +13,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app.py .
 
-# Expose port (Render dynamically assigns port, default to 2020 for local)
-EXPOSE 2020
+# Expose default port
+EXPOSE 5000
 
-# Set environment variable for Flask
-ENV FLASK_APP=app.py
-
-# Run with gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:$PORT", "app:app"]
+# Use entrypoint script to handle PORT
+ENTRYPOINT ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-5000} app:app"]
