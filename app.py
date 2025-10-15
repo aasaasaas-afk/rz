@@ -9,7 +9,6 @@ import hashlib
 import base64
 import logging
 import os
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 app = Flask(__name__)
 
@@ -45,12 +44,6 @@ class RazorpayChecker:
         chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
         return ''.join(random.choice(chars) for _ in range(14))
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(requests.RequestException),
-        before_sleep=lambda retry_state: logger.info(f"Retrying load_payment_page... Attempt {retry_state.attempt_number}")
-    )
     def load_payment_page(self):
         """Request #1: Load payment page"""
         try:
@@ -65,12 +58,14 @@ class RazorpayChecker:
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.5',
-                    'Connection': 'keep-alive'
+                    'Connection': 'keep-alive',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Upgrade-Insecure-Requests': '1'
                 },
                 timeout=15
             )
 
-            logger.info(f"           Status: {response.status_code} ✓")
+            logger.info(f"           Status: {response.status_code}")
 
             if response.status_code == 200:
                 # Primary regex for key_id
@@ -87,15 +82,15 @@ class RazorpayChecker:
                     logger.info(f"           ✓ key_id (fallback): {self.key_id}")
                     return True
                 
-                logger.error(f"           Failed to extract key_id. Response snippet: {response.text[:200]}...")
+                logger.error(f"           Failed to extract key_id. Response snippet: {response.text[:500]}...")
                 return False
             
-            logger.error(f"           Failed with status {response.status_code}. Response: {response.text[:200]}...")
+            logger.error(f"           Failed with status {response.status_code}. Response: {response.text[:500]}...")
             return False
 
         except requests.RequestException as e:
             logger.error(f"           Request error: {str(e)}")
-            raise
+            return False
         except Exception as e:
             logger.error(f"           Unexpected error: {str(e)}")
             return False
@@ -118,7 +113,7 @@ class RazorpayChecker:
                 timeout=15
             )
 
-            logger.info(f"           Status: {response.status_code} ✓")
+            logger.info(f"           Status: {response.status_code}")
 
             if response.status_code == 200:
                 data = response.json()
@@ -126,9 +121,9 @@ class RazorpayChecker:
                 if self.order_id:
                     logger.info(f"           ✓ order_id: {self.order_id}")
                     return True
-                logger.error(f"           No order_id found in response: {json.dumps(data, indent=2)[:200]}...")
+                logger.error(f"           No order_id found in response: {json.dumps(data, indent=2)[:500]}...")
                 return False
-            logger.error(f"           Failed with status {response.status_code}. Response: {response.text[:200]}...")
+            logger.error(f"           Failed with status {response.status_code}. Response: {response.text[:500]}...")
             return False
 
         except Exception as e:
@@ -158,12 +153,14 @@ class RazorpayChecker:
 
             response = self.session.get(
                 'https://api.razorpay.com/v1/checkout/public',
-                params=params,
                 headers={
                     'Accept': 'text/html',
                     'Referer': 'https://pages.razorpay.com/',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Connection': 'keep-alive'
                 },
+                params=params,
                 timeout=15
             )
 
@@ -176,9 +173,9 @@ class RazorpayChecker:
                     self.session_token = token_match.group(1)
                     logger.info(f"           ✓ session_token: {self.session_token[:40]}...")
                     return True
-                logger.error(f"           Failed to extract session_token. Response: {response.text[:200]}...")
+                logger.error(f"           Failed to extract session_token. Response: {response.text[:500]}...")
                 return False
-            logger.error(f"           Failed with status {response.status_code}. Response: {response.text[:200]}...")
+            logger.error(f"           Failed with status {response.status_code}. Response: {response.text[:500]}...")
             return False
 
         except Exception as e:
@@ -237,7 +234,9 @@ class RazorpayChecker:
                 headers={
                     'Content-type': 'application/x-www-form-urlencoded',
                     'User-Agent': 'Mozilla/5.0',
-                    'x-session-token': self.session_token
+                    'x-session-token': self.session_token,
+                    'Accept': 'application/json',
+                    'Accept-Language': 'en-US,en;q=0.5'
                 },
                 data=data,
                 timeout=30
@@ -254,7 +253,7 @@ class RazorpayChecker:
                 logger.info(f"           payment_id: {self.payment_id}")
                 return result
             else:
-                return {'error': f"HTTP {response.status_code}", 'raw': response.text[:300]}
+                return {'error': f"HTTP {response.status_code}", 'raw': response.text[:500]}
 
         except Exception as e:
             logger.error(f"           Error: {str(e)}")
@@ -275,7 +274,12 @@ class RazorpayChecker:
                     'session_token': self.session_token,
                     'keyless_header': self.keyless_header
                 },
-                headers={'x-session-token': self.session_token},
+                headers={
+                    'x-session-token': self.session_token,
+                    'User-Agent': 'Mozilla/5.0',
+                    'Accept': 'application/json',
+                    'Accept-Language': 'en-US,en;q=0.5'
+                },
                 timeout=15
             )
 
@@ -332,7 +336,7 @@ def format_response(payment_response, status_response=None):
             'gateway': 'Razorpay',
             'amount': '₹1.00 INR',
             'message': payment_response.get('error', 'Unknown error'),
-            'raw': payment_response.get('raw', '')[:200]
+            'raw': payment_response.get('raw', '')[:500]
         }
 
     if 'razorpay_payment_id' in payment_response:
@@ -353,7 +357,7 @@ def format_response(payment_response, status_response=None):
         elif action == '3ds':
             return {'status': '🔒 3DS REQUIRED', 'gateway': 'Razorpay', 'amount': '₹1.00 INR', 'message': '3DS needed'}
 
-    return {'status': '❓ UNKNOWN', 'gateway': 'Razorpay', 'amount': '₹1.00 INR', 'raw': str(payment_response)[:200]}
+    return {'status': '❓ UNKNOWN', 'gateway': 'Razorpay', 'amount': '₹1.00 INR', 'raw': str(payment_response)[:500]}
 
 @app.route('/api/razorpay/pay', methods=['GET'])
 def check_card():
@@ -427,7 +431,7 @@ if __name__ == '__main__':
     print("  3. Load checkout page → Extract session_token from HTML")
     print("  4. Submit payment → Process card with real token")
     print("  5. Check status → Get final result")
-    print("\nServer starting on 0.0.0.0:5000...")
+    print("\nServer starting on 0.0.0.0:10000...")
     print("="*70 + "\n")
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
