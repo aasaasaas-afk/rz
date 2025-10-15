@@ -373,16 +373,7 @@ def health():
 
 @app.route('/', methods=['GET'])
 def root():
-    return jsonify({
-        'service': 'Razorpay Card Checker API',
-        'version': '1.1.0',
-        'gateway': 'Razorpay (India)',
-        'amount': '₹1.00 INR',
-        'endpoints': {
-            '/api/razorpay/pay?cc=CARD|MM|YY|CVV': 'Card check (returns description and Status: approved/declined/charged/3ds)',
-            '/health': 'Health check'
-        }
-    }), 200
+    return jsonify({'description': 'Razorpay Card Checker API is running', 'Status': 'approved'}), 200
 
 if __name__ == '__main__':
     print("\n" + "="*70)
